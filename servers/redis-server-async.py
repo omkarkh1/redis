@@ -17,13 +17,40 @@
 import asyncio
 import sys
 import os
+import time
 
 # Add parent directory to sys.path to resolve imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.logging_config import get_logger
+from utils.logging_config import get_logger, LoggerAdapter
+from protocols.resp_v2.parser import parse_resp
+from protocols.resp_v2.serializer import send_resp_async
+from commands.processor import RedisDataStore, RedisCommandDispatcher
 
 # Set up logger
 logger = get_logger(__name__)
+
+# Stats tracking
+connection_count = 0
+command_count = 0
+start_time = 0
+
+def print_banner():
+    """Print a Redis server banner to the console"""
+    banner = """
+    ____           ___      
+   / __ \\___ _____/ (_)_____
+  / /_/ / _ `/ __/ / / __(_)
+ / _, _/\\_,_/\\__/_/_/\\__(_) 
+/_/ |_|     Async Server    
+    """
+    print(banner)
+    print("Redis-compatible async server starting...\n")
+
+# Create Redis data store and command dispatcher (shared among all clients)
+print_banner()
+logger.info("Initializing Redis server components")
+data_store = RedisDataStore()
+command_dispatcher = RedisCommandDispatcher(data_store)
 
 async def handle_client(reader, writer):
     """
@@ -48,52 +75,84 @@ async def handle_client(reader, writer):
     This coroutine processes incoming client connections, reads data sent by clients,
     and sends responses back.
     """
+    global connection_count, command_count
+    
+    # Increment connection counter
+    connection_count += 1
+    
     # Get client's address information (IP, port)
     addr = writer.get_extra_info('peername')
-    logger.info(f"Connected to {addr}")
+    
+    # Create a connection-specific logger
+    conn_logger = LoggerAdapter(logger, {"client": f"{addr[0]}:{addr[1]}", "conn_id": connection_count})
+    
+    conn_logger.info(f"New connection established (total: {connection_count})")
+    print(f"Client connected from {addr[0]}:{addr[1]} (connection #{connection_count})")
     
     try:
         # Continuously process client requests until connection is closed
         while True:
-            # Read up to 1024 bytes of data asynchronously from the client
+            # Read up to 4096 bytes of data asynchronously from the client
             # This is a non-blocking operation that yields control until data is available
-            data = await reader.read(1024)
+            data = await reader.read(4096)
             
             # If client closed the connection, data will be empty
             if not data:
+                conn_logger.debug(f"Client closed connection")
+                print(f"Client {addr[0]}:{addr[1]} closed connection")
                 break
             
-            # Convert binary data to string for display purposes    
-            message = data.decode()
-            logger.debug(f"Received {message} from {addr}")
+            conn_logger.debug(f"Received {len(data)} bytes")
             
-            # TODO: Implement actual Redis command processing:
-            # 1. Parse the RESP protocol format (Redis serialization protocol)
-            # 2. Identify the command (GET, SET, DEL, etc.)
-            # 3. Execute the command against the in-memory data store
-            # 4. Format the response according to RESP protocol
-            # 5. Return appropriate response based on the command result
-            #
-            # For now, we're just echoing back the received data
-            writer.write(data)
+            try:
+                # Parse the RESP data
+                command = parse_resp(data)
+                
+                # Command-specific logging handled in the dispatcher
+                command_count += 1
+                
+                # Get rough command string for display
+                cmd_str = command[0].decode('utf-8') if isinstance(command[0], bytes) else str(command[0])
+                conn_logger.debug(f"Processing command #{command_count}: {cmd_str}")
+                
+                # Dispatch the command to the appropriate handler
+                start_time_cmd = time.time()
+                result = command_dispatcher.dispatch(command)
+                exec_time_ms = (time.time() - start_time_cmd) * 1000
+                
+                # Send the result back to the client asynchronously
+                await send_resp_async(writer, result)
+                conn_logger.debug(f"Response sent ({exec_time_ms:.2f}ms)")
+                
+            except Exception as e:
+                # Log the error
+                conn_logger.error(f"Error processing command: {e}", exc_info=True)
+                print(f"Error processing command from {addr[0]}:{addr[1]}: {e}")
+                # Send error response
+                await send_resp_async(writer, f"Error: {str(e)}")
             
-            # Ensure the data is actually sent (buffer is flushed)
-            # drain() is a flow control method that prevents flooding the client
-            await writer.drain()
-            logger.debug(f"Echo response sent to {addr}")
-            
+    except asyncio.CancelledError:
+        conn_logger.info("Connection handling was cancelled")
+        print(f"Connection handling for {addr[0]}:{addr[1]} was cancelled")
     except Exception as e:
         # Handle any exceptions that occur during client communication
-        logger.error(f"Error handling client {addr}: {e}", exc_info=True)
+        conn_logger.error(f"Error handling client: {e}", exc_info=True)
+        print(f"Error handling client {addr[0]}:{addr[1]}: {e}")
     finally:
         # Clean up resources, regardless of how the connection ended
-        logger.info(f"Closing connection with {addr}")
-        # Close the writer stream
-        writer.close()
-        # Asynchronously wait until the writer is properly closed
-        # This ensures all pending data is sent before fully closing the connection
-        await writer.wait_closed()
-        logger.debug(f"Connection with {addr} closed successfully")
+        conn_logger.info(f"Closing connection")
+        print(f"Closing connection with {addr[0]}:{addr[1]}")
+        
+        try:
+            # Close the writer stream
+            writer.close()
+            # Asynchronously wait until the writer is properly closed
+            # This ensures all pending data is sent before fully closing the connection
+            await writer.wait_closed()
+            conn_logger.debug(f"Connection closed successfully")
+        except Exception as e:
+            conn_logger.error(f"Error closing connection: {e}")
+            print(f"Error closing connection with {addr[0]}:{addr[1]}: {e}")
 
 async def start_redis_server():
     """
@@ -105,6 +164,11 @@ async def start_redis_server():
     Returns:
         None
     """
+    global start_time
+    
+    # Record start time for statistics
+    start_time = time.time()
+    
     # Create and start a TCP server that listens for connections
     # When a client connects, handle_client coroutine is called with reader/writer objects
     server = await asyncio.start_server(
@@ -115,29 +179,32 @@ async def start_redis_server():
     
     # Get the server's bound address for informational purposes
     addr = server.sockets[0].getsockname()
-    logger.info(f'Redis server running on {addr}')
+    logger.info(f'Redis async server running on {addr[0]}:{addr[1]}')
+    print(f"Server listening on {addr[0]}:{addr[1]}")
+    
+    # Set up periodic stats reporting
+    asyncio.create_task(report_stats())
     
     # Using async with ensures proper cleanup when the server is stopped
-    # The async with statement creates a context manager that:
-    #   1. Starts the server (already done by the await asyncio.start_server call above)
-    #   2. Acquires resources needed for the server to run
-    #   3. Automatically closes these resources when the block exits, even if exceptions occur
-    #   4. Calls server.close() and server.wait_closed() to ensure graceful shutdown
-    #   5. Prevents resource leaks (like open socket connections) by ensuring cleanup
     async with server:
         # serve_forever() keeps the server running until it's explicitly stopped
-        # This is a non-blocking call that yields control periodically
-        # 
-        # What happens internally:
-        #   1. The server enters an infinite loop accepting new connections
-        #   2. For each connection, it creates reader/writer objects
-        #   3. It calls our handle_client coroutine with these objects
-        #   4. Multiple client connections are handled concurrently by the event loop
-        #   5. The server will run until:
-        #      - The server is closed (server.close() is called)
-        #      - A cancellation is requested (server task is cancelled)
-        #      - An unhandled exception occurs
         await server.serve_forever()
+
+async def report_stats():
+    """Periodically report server statistics"""
+    while True:
+        await asyncio.sleep(60)  # Report every minute
+        
+        # Calculate uptime
+        uptime = time.time() - start_time
+        hours, remainder = divmod(uptime, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        logger.info(f"Server stats: {connection_count} connections, {command_count} commands, "
+                   f"uptime: {int(hours)}h {int(minutes)}m {int(seconds)}s")
+        print(f"\nServer statistics (running for {int(hours)}h {int(minutes)}m {int(seconds)}s):")
+        print(f"- Total connections: {connection_count}")
+        print(f"- Total commands processed: {command_count}")
 
 # Entry point of the program
 if __name__ == "__main__":
@@ -146,6 +213,23 @@ if __name__ == "__main__":
         # asyncio.run() creates a new event loop, runs the coroutine, and closes the loop
         asyncio.run(start_redis_server())
     except KeyboardInterrupt:
-        # Handle graceful shutdown when user presses Ctrl+C
-        logger.info("Server stopped")
+        # Calculate uptime
+        if start_time > 0:
+            uptime = time.time() - start_time
+            hours, remainder = divmod(uptime, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            # Log server shutdown with statistics
+            logger.info(f"Server shutting down. Stats: {connection_count} connections, {command_count} commands, "
+                       f"uptime: {int(hours)}h {int(minutes)}m {int(seconds)}s")
+            print(f"\nServer shutting down - Final Statistics:")
+            print(f"- Total connections: {connection_count}")
+            print(f"- Total commands processed: {command_count}")
+            print(f"- Server uptime: {int(hours)}h {int(minutes)}m {int(seconds)}s")
+        else:
+            logger.info("Server stopped before starting")
+            print("Server stopped before starting")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        print(f"Unexpected error: {e}")
 
