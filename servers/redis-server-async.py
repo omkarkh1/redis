@@ -13,7 +13,17 @@
 #
 # This approach enables handling hundreds or thousands of connections simultaneously
 # within a single thread, similar to how Redis achieves high performance.
+# Author: omkarkh1
 import asyncio
+import sys
+import os
+
+# Add parent directory to sys.path to resolve imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.logging_config import get_logger
+
+# Set up logger
+logger = get_logger(__name__)
 
 async def handle_client(reader, writer):
     """
@@ -40,7 +50,7 @@ async def handle_client(reader, writer):
     """
     # Get client's address information (IP, port)
     addr = writer.get_extra_info('peername')
-    print(f"Connected to {addr}")
+    logger.info(f"Connected to {addr}")
     
     try:
         # Continuously process client requests until connection is closed
@@ -55,7 +65,7 @@ async def handle_client(reader, writer):
             
             # Convert binary data to string for display purposes    
             message = data.decode()
-            print(f"Received {message} from {addr}")
+            logger.debug(f"Received {message} from {addr}")
             
             # TODO: Implement actual Redis command processing:
             # 1. Parse the RESP protocol format (Redis serialization protocol)
@@ -70,18 +80,20 @@ async def handle_client(reader, writer):
             # Ensure the data is actually sent (buffer is flushed)
             # drain() is a flow control method that prevents flooding the client
             await writer.drain()
+            logger.debug(f"Echo response sent to {addr}")
             
     except Exception as e:
         # Handle any exceptions that occur during client communication
-        print(f"Error handling client {addr}: {e}")
+        logger.error(f"Error handling client {addr}: {e}", exc_info=True)
     finally:
         # Clean up resources, regardless of how the connection ended
-        print(f"Closing connection with {addr}")
+        logger.info(f"Closing connection with {addr}")
         # Close the writer stream
         writer.close()
         # Asynchronously wait until the writer is properly closed
         # This ensures all pending data is sent before fully closing the connection
         await writer.wait_closed()
+        logger.debug(f"Connection with {addr} closed successfully")
 
 async def start_redis_server():
     """
@@ -103,7 +115,7 @@ async def start_redis_server():
     
     # Get the server's bound address for informational purposes
     addr = server.sockets[0].getsockname()
-    print(f'Redis server running on {addr}')
+    logger.info(f'Redis server running on {addr}')
     
     # Using async with ensures proper cleanup when the server is stopped
     # The async with statement creates a context manager that:
@@ -135,5 +147,5 @@ if __name__ == "__main__":
         asyncio.run(start_redis_server())
     except KeyboardInterrupt:
         # Handle graceful shutdown when user presses Ctrl+C
-        print("Server stopped")
+        logger.info("Server stopped")
 

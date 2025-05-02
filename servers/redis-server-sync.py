@@ -1,5 +1,15 @@
 # Import the socket module for network communication
+# Author: omkarkh1
 import socket
+import sys
+import os
+
+# Add parent directory to sys.path to resolve imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.logging_config import get_logger
+
+# Set up logger
+logger = get_logger(__name__)
 
 # Create a new TCP/IP socket using IPv4
 # Parameters:
@@ -21,23 +31,23 @@ server_socket.bind(('localhost', 6379))
 # Parameter:
 #   backlog=5: Maximum number of queued connections before refusing new ones
 server_socket.listen(backlog=5)
-# Print a message indicating the server has started
-print("Redis server started on port 6379")
+# Log server start
+logger.info("Redis server started on port 6379")
 
 # Use a try...finally block to ensure the server socket is always closed
 try:
     # Start an infinite loop to continuously accept client connections
     while True:
-        # Print a message indicating the server is waiting for a connection
-        print("Waiting for a connection...")
+        # Log waiting for connection
+        logger.debug("Waiting for a connection...")
         # Accept an incoming connection
         # This blocks until a client connects
         # Returns:
         #   client_socket: A new socket object for communication with the client
         #   addr: A tuple containing the client's (IP address, port number)
         client_socket, addr = server_socket.accept()
-        # Print the address of the connected client
-        print(f"Connection from {addr}")
+        # Log the connected client address
+        logger.info(f"Connection from {addr}")
 
         # TODO: Handle client communication (e.g., read commands, send responses)
         # In a real server, communication logic would go here.
@@ -51,13 +61,14 @@ try:
         # For now, just close the client socket immediately
         # This ends the connection with the current client
         client_socket.close()
+        logger.debug(f"Closed connection with {addr}")
 # Catch KeyboardInterrupt (Ctrl+C) to allow graceful shutdown
 except KeyboardInterrupt:
-    # Print a message indicating the server is shutting down
-    print("Server shutting down.")
+    # Log server shutdown
+    logger.info("Server shutting down.")
 # The finally block ensures this code runs regardless of exceptions
 finally:
     # Close the main server listening socket
     server_socket.close()
-    # Print a confirmation that the server socket has been closed
-    print("Server socket closed.")
+    # Log socket closure
+    logger.info("Server socket closed.")
